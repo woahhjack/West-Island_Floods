@@ -3,96 +3,113 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>West Island June 20 Flood Map</title>
+    <title>West Island June 20 Flood Map / Carte des Inondations</title>
+    <!-- Leaflet Maps CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-        #map { height: 100vh; width: 100vw; }
+        body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+        #map { height: 100vh; width: 100vw; z-index: 1; }
         .legend {
-            background: white; padding: 10px; line-height: 18px;
-            box-shadow: 0 0 15px rgba(0,0,0,0.2); border-radius: 5px;
+            background: white; padding: 12px; line-height: 20px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.15); border-radius: 8px; font-size: 13px;
         }
-        .legend i { width: 18px; height: 18px; float: left; margin-right: 8px; opacity: 0.7; border-radius: 50%; }
+        .legend i { width: 14px; height: 14px; float: left; margin-right: 8px; opacity: 0.8; border-radius: 50%; margin-top: 3px; }
+        .report-btn {
+            position: absolute; top: 20px; left: 60px; z-index: 1000; 
+            background: white; padding: 12px 18px; border-radius: 8px; 
+            box-shadow: 0 4px 20px rgba(0,0,0,0.2); font-weight: bold; 
+            text-decoration: none; color: #d9534f; border: 2px solid #d9534f;
+            font-size: 14px; text-align: center; line-height: 1.4;
+            transition: all 0.2s ease;
+        }
+        .report-btn:hover { background: #d9534f; color: white; }
     </style>
 </head>
 <body>
 
+    <!-- Bilingual Floating Action Button -->
+    <a href="YOUR_PUBLIC_GOOGLE_FORM_LINK_HERE" target="_blank" class="report-btn">
+        ⚠️ Report a Flooded Home<br><span style="font-size: 11px; font-weight: normal; display:block; margin-top:2px;">Signaler une maison inondée</span>
+    </a>
+
     <div id="map"></div>
 
+    <!-- Leaflet Maps JavaScript -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // 1. REPLACE THIS URL with your copied Google Web App URL
+        // Paste your Google Apps Script Web App URL inside the quotes below:
         const DATA_FEED_URL = "YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE";
 
-        // Initialize map centered roughly over the West Island (DDO / Pointe-Claire area)
+        // Initialize map centered right over the West Island area
         const map = L.map('map').setView([45.4764, -73.8417], 12);
 
-        // Add clean OpenStreetMap map tiles
+        // Load clean map graphics
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap contributors'
         }).addTo(map);
 
-        // Helper for marker colors
+        // Language-agnostic color parser (looks for EN or FR indicators)
         function getMarkerColor(severity) {
             const sev = severity.toLowerCase().trim();
-            if (sev.includes('severe')) return 'red';
-            if (sev.includes('mild')) return 'orange';
-            return 'green';
+            if (sev.includes('severe') || sev.includes('majeur')) return '#d9534f'; // Red
+            if (sev.includes('mild') || sev.includes('modér') || sev.includes('moyen')) return '#f0ad4e'; // Yellow/Orange
+            return '#5cb85c'; // Green
         }
 
-        // Fetch approved data from your Google Sheet script
-        fetch(DATA_FEED_URL)
-            .then(res => res.json())
-            .then(reports => {
-                reports.forEach(report => {
-                    // Pull fields based on your exact Form headers (lowercase, no spaces)
-                    const address = report.addressornearestintersection; 
-                    const nickname = report.nickname || "Anonymous";
-                    const severity = report.floodseverity || "No Flood";
+        // Fetch data from your approved Google Sheet rows
+        if (DATA_FEED_URL !== "YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE") {
+            fetch(DATA_FEED_URL)
+                .then(res => res.json())
+                .then(reports => {
+                    reports.forEach((report, index) => {
+                        const address = report.addressornearestintersection; 
+                        const nickname = report.nickname || "Neighbor / Voisin";
+                        const severity = report.floodseverity || "Low / Faible";
 
-                    if (!address) return;
+                        if (!address) return;
 
-                    // Geocode the address safely on the client side for free
-                    const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}+West+Island+Montreal`;
-                    
-                    // Add a tiny delay to respect open-source rate limits during batch loads
-                    setTimeout(() => {
-                        fetch(searchUrl)
-                            .then(r => r.json())
-                            .then(geoResults => {
-                                if (geoResults && geoResults.length > 0) {
-                                    const loc = geoResults[0];
-                                    const color = getMarkerColor(severity);
+                        const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}+West+Island+Montreal`;
+                        
+                        setTimeout(() => {
+                            fetch(searchUrl)
+                                .then(r => r.json())
+                                .then(geoResults => {
+                                    if (geoResults && geoResults.length > 0) {
+                                        const loc = geoResults[0];
+                                        const color = getMarkerColor(severity);
 
-                                    // Create a colored circle marker
-                                    const marker = L.circleMarker([loc.lat, loc.lon], {
-                                        radius: 10,
-                                        fillColor: color,
-                                        color: '#fff',
-                                        weight: 2,
-                                        opacity: 1,
-                                        fillOpacity: 0.8
-                                    }).addTo(map);
+                                        const marker = L.circleMarker([loc.lat, loc.lon], {
+                                            radius: 10,
+                                            fillColor: color,
+                                            color: '#fff',
+                                            weight: 2,
+                                            opacity: 1,
+                                            fillOpacity: 0.85
+                                        }).addTo(map);
 
-                                    marker.bindPopup(`
-                                        <strong>Reported by:</strong> ${nickname}<br>
-                                        <strong>Location:</strong> ${address}<br>
-                                        <strong>Status:</strong> ${severity}
-                                    `);
-                                }
-                            }).catch(err => console.error("Geocoding error:", err));
-                    }, 200); 
-                });
-            });
+                                        marker.bindPopup(`
+                                            <div style="font-family: sans-serif; font-size: 13px; line-height: 18px;">
+                                                <strong style="font-size: 14px; color: #333;">${severity}</strong><br>
+                                                <hr style="border: 0; border-top: 1px solid #eee; margin: 6px 0;">
+                                                <strong>User / Info:</strong> ${nickname}<br>
+                                                <strong>Address / Adresse:</strong> ${address}
+                                            </div>
+                                        `);
+                                    }
+                                }).catch(err => console.error("Geocoding failed:", address, err));
+                        }, index * 250); 
+                    });
+                }).catch(err => console.error("Data error:", err));
+        }
 
-        // Add a visual Legend to the map
+        // Setup the map's visual legend box (Bilingual)
         const legend = L.control({position: 'bottomright'});
         legend.onAdd = function () {
             const div = L.DomUtil.create('div', 'legend');
-            div.innerHTML += '<strong>Flood Status</strong><br>';
-            div.innerHTML += '<i style="background: red"></i> Severe Flood<br>';
-            div.innerHTML += '<i style="background: orange"></i> Mild Flood<br>';
-            div.innerHTML += '<i style="background: green"></i> No Flood<br>';
+            div.innerHTML += '<strong style="display:block; margin-bottom: 6px;">Status / Statut</strong>';
+            div.innerHTML += '<div><i style="background: #d9534f"></i> Severe / Majeure</div>';
+            div.innerHTML += '<div><i style="background: #f0ad4e"></i> Mild / Modérée</div>';
+            div.innerHTML += '<div><i style="background: #5cb85c"></i> Low / No Flood / Faible</div>';
             return div;
         };
         legend.addTo(map);
