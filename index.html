@@ -53,52 +53,109 @@
             return '#5cb85c'; 
         }
 
+        // Distance utility to locate the closest coordinate point along a street array
+        function findClosestCoordinateIndex(coords, targetLat, targetLon) {
+            let minDistance = Infinity;
+            let closestIndex = 0;
+            for (let i = 0; i < coords.length; i++) {
+                let distance = Math.pow(coords[i][1] - targetLat, 2) + Math.pow(coords[i][0] - targetLon, 2);
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    closestIndex = i;
+                }
+            }
+            return closestIndex;
+        }
+
         if (DATA_FEED_URL) {
             fetch(DATA_FEED_URL)
                 .then(res => res.json())
                 .then(reports => {
                     reports.forEach((report, index) => {
-                        const address = report.address; 
+                        const addressText = report.address; 
                         const nickname = report.nickname || "Neighbor / Voisin";
                         const severity = report.severity || "Low / Faible";
 
-                        if (!address) return;
+                        if (!addressText) return;
 
-                        // Geocoding query appending Quebec, Canada for high-accuracy regional indexing
-                        const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)},+Quebec,+Canada`;
-                        
-                        // 1.5-second staggered timeout window prevents open-source search server limits from tripping
+                        const color = getMarkerColor(severity);
+                        const popupContent = `
+                            <div style="font-family: sans-serif; font-size: 13px; line-height: 18px;">
+                                <strong style="font-size: 14px; color: #333;">${severity}</strong><br>
+                                <hr style="border: 0; border-top: 1px solid #eee; margin: 6px 0;">
+                                <strong>User / Info:</strong> ${nickname}<br>
+                                <strong>Location / Emplacement:</strong> ${addressText}
+                            </div>
+                        `;
+
+                        // RegEx scans to check if the submission begins with a numeric street address marker
+                        const hasHouseNumber = /^\d+/.test(addressText.trim());
+
                         setTimeout(() => {
-                            fetch(searchUrl)
-                                .then(r => r.json())
-                                .then(geoResults => {
-                                    if (geoResults && geoResults.length > 0) {
-                                        const loc = geoResults[0];
-                                        const color = getMarkerColor(severity);
+                            if (hasHouseNumber) {
+                                // TRACK 3: SPECIFIC ADDRESS (Localized Street Segment Slicing)
+                                const exactUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addressText)},+Quebec,+Canada`;
+                                
+                                fetch(exactUrl)
+                                    .then(r => r.json())
+                                    .then(exactResults => {
+                                        if (exactResults && exactResults.length > 0) {
+                                            const exactLat = parseFloat(exactResults[0].lat);
+                                            const exactLon = parseFloat(exactResults[0].lon);
+                                            const baseStreet = addressText.replace(/^\d+[-/\d]*\s+/, '');
 
-                                        // Formats 12px circular map pins
-                                        const marker = L.circleMarker([loc.lat, loc.lon], {
-                                            radius: 12,
-                                            fillColor: color,
-                                            color: '#fff',
-                                            weight: 2,
-                                            opacity: 1,
-                                            fillOpacity: 0.8
-                                        }).addTo(map);
+                                            // Sub-fetch the underlying street line string geometry
+                                            const streetUrl = `https://nominatim.openstreetmap.org/search?format=json&polygon_geojson=1&q=${encodeURIComponent(baseStreet)},+Quebec,+Canada`;
+                                            
+                                            fetch(streetUrl)
+                                                .then(r2 => r2.json())
+                                                .then(streetResults => {
+                                                    const match = streetResults.find(res => res.geojson && (res.geojson.type === "LineString" || res.geojson.type === "MultiLineString"));
+                                                    if (match && match.geojson.type === "LineString") {
+                                                        const coords = match.geojson.coordinates;
+                                                        const closestIdx = findClosestCoordinateIndex(coords, exactLat, exactLon);
+                                                        
+                                                        // Slice array to isolate the immediate neighborhood layout (+/- 3 vector nodes)
+                                                        const start = Math.max(0, closestIdx - 3);
+                                                        const end = Math.min(coords.length, closestIdx + 4);
+                                                        match.geojson.coordinates = coords.slice(start, end);
 
-                                        marker.bindPopup(`
-                                            <div style="font-family: sans-serif; font-size: 13px; line-height: 18px;">
-                                                <strong style="font-size: 14px; color: #333;">${severity}</strong><br>
-                                                <hr style="border: 0; border-top: 1px solid #eee; margin: 6px 0;">
-                                                <strong>User / Info:</strong> ${nickname}<br>
-                                                <strong>Location / Emplacement:</strong> ${address}
-                                            </div>
-                                        `);
-                                    }
-                                }).catch(err => console.error("Geocoding failed:", address, err));
-                        }, index * 1500); 
+                                                        L.geoJSON(match.geojson, {
+                                                            style: { color: color, weight: 9, opacity: 0.7, lineCap: 'round' }
+                                                        }).addTo(map).bindPopup(popupContent);
+                                                    } else {
+                                                        // Point backup fallback if vector calculation fails
+                                                        L.circleMarker([exactLat, exactLon], { radius: 12, fillColor: color, color: '#fff', weight: 2, opacity: 1, fillOpacity: 0.8 }).addTo(map).bindPopup(popupContent);
+                                                    }
+                                                });
+                                        }
+                                    }).catch(err => console.error("Address track processing error:", err));
+
+                            } else {
+                                // TRACK 1 & 2: WHOLE STREET OR LANDMARK POI
+                                const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&polygon_geojson=1&q=${encodeURIComponent(addressText)},+Quebec,+Canada`;
+                                
+                                fetch(searchUrl)
+                                    .then(r => r.json())
+                                    .then(geoResults => {
+                                        if (geoResults && geoResults.length > 0) {
+                                            const loc = geoResults[0];
+
+                                            if (loc.geojson && (loc.geojson.type === "LineString" || loc.geojson.type === "MultiLineString")) {
+                                                // Renders the entire street line because no house number was specified
+                                                L.geoJSON(loc.geojson, {
+                                                    style: { color: color, weight: 8, opacity: 0.65, lineCap: 'round' }
+                                                }).addTo(map).bindPopup(popupContent);
+                                            } else {
+                                                // Renders standalone circular bubble for landmarks/POIs (e.g., schools, parks)
+                                                L.circleMarker([loc.lat, loc.lon], { radius: 12, fillColor: color, color: '#fff', weight: 2, opacity: 1, fillOpacity: 0.8 }).addTo(map).bindPopup(popupContent);
+                                            }
+                                        }
+                                    }).catch(err => console.error("Standard track processing error:", err));
+                            }
+                        }, index * 2500); // 2.5 second intervals protects geocoding server performance
                     });
-                }).catch(err => console.error("Data feed error:", err));
+                }).catch(err => console.error("Data feed loading error:", err));
         }
 
         // Map Legend setup
