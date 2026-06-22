@@ -34,10 +34,18 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // Paste your Apps Script Web App URL here (same one you had before)
         const DATA_FEED_URL = "https://script.google.com/macros/s/AKfycbxNfHFi5zd41IgTSy04JgUznhCbvtQVn9tHcH7ryLubzhFlfNfbUf0_-aujaqOkxhKgxw/exec";
 
-        // Initialized zoom at 12.5 (1.5x closer scale)
+        const INTERSECTION_TRIM_METERS = 200;
+        const ADDRESS_TRIM_METERS = 80;
+        const OVERPASS_SEARCH_RADIUS_METERS = 150;
+        const OVERPASS_ENDPOINTS = [
+            "https://overpass-api.de/api/interpreter",
+            "https://overpass.kumi.systems/api/interpreter",
+            "https://overpass.private.coffee/api/interpreter"
+        ];
+        const OVERPASS_FETCH_TIMEOUT_MS = 8000;
+
         const map = L.map('map').setView([45.4764, -73.8417], 12.5);
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -47,41 +55,230 @@
         function getMarkerColor(severity) {
             if (!severity) return '#5cb85c';
             const sev = severity.toLowerCase().trim();
-            if (sev.includes('severe') || sev.includes('majeur')) return '#d9534f'; 
-            if (sev.includes('mild') || sev.includes('modér') || sev.includes('medium') || sev.includes('moyen')) return '#f0ad4e'; 
-            return '#5cb85c'; 
+            if (sev.includes('severe') || sev.includes('majeur')) return '#d9534f';
+            if (sev.includes('mild') || sev.includes('modér') || sev.includes('medium') || sev.includes('moyen')) return '#f0ad4e';
+            return '#5cb85c';
         }
 
+        function buildPopup(report) {
+            return `
+                <div style="font-family: sans-serif; font-size: 13px; line-height: 18px;">
+                    <strong style="font-size: 14px; color: #333;">${report.severity || ''}</strong><br>
+                    <hr style="border: 0; border-top: 1px solid #eee; margin: 6px 0;">
+                    <strong>Location / Emplacement:</strong> ${report.address}
+                    ${report.details ? `<br><strong>Details:</strong> ${report.details}` : ''}
+                </div>
+            `;
+        }
+
+        function drawCircleFallback(report, color, popupContent) {
+            const isIntersection = /[\/&]|\band\b/i.test(report.address) && !/school|high|park|centre/i.test(report.address);
+            const hasHouseNumber = /^\d+/.test(report.address.trim());
+
+            if (isIntersection) {
+                L.circle([report.lat, report.lon], { radius: 150, fillColor: color, color: color, weight: 3, fillOpacity: 0.45 }).addTo(map).bindPopup(popupContent);
+            } else if (!hasHouseNumber) {
+                L.circle([report.lat, report.lon], { radius: 200, fillColor: color, color: color, weight: 2, fillOpacity: 0.4 }).addTo(map).bindPopup(popupContent);
+            } else {
+                L.circle([report.lat, report.lon], { radius: 40, fillColor: color, color: color, weight: 2, fillOpacity: 0.6 }).addTo(map).bindPopup(popupContent);
+            }
+        }
+
+        // =========================================================
+        // GEOMETRY MATH (Haversine distance + line trimming)
+        // Ported and validated from the original Apps Script version.
+        // =========================================================
+        function haversineMeters(p1, p2) {
+            const R = 6371000;
+            const toRad = deg => deg * Math.PI / 180;
+            const dLat = toRad(p2.lat - p1.lat);
+            const dLon = toRad(p2.lon - p1.lon);
+            const lat1 = toRad(p1.lat);
+            const lat2 = toRad(p2.lat);
+            const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        }
+
+        function findClosestPointOnLine(line, target) {
+            let bestIdx = 0, bestDist = Infinity;
+            for (let i = 0; i < line.length; i++) {
+                const d = haversineMeters(line[i], target);
+                if (d < bestDist) { bestDist = d; bestIdx = i; }
+            }
+            return { index: bestIdx, distance: bestDist };
+        }
+
+        function walkDistance(line, startIndex, direction, maxMeters) {
+            const result = [line[startIndex]];
+            let accumulated = 0, i = startIndex;
+            while (true) {
+                const nextI = i + direction;
+                if (nextI < 0 || nextI >= line.length) break;
+                const segmentDist = haversineMeters(line[i], line[nextI]);
+                if (accumulated + segmentDist >= maxMeters) {
+                    const fraction = (maxMeters - accumulated) / segmentDist;
+                    result.push({
+                        lat: line[i].lat + (line[nextI].lat - line[i].lat) * fraction,
+                        lon: line[i].lon + (line[nextI].lon - line[i].lon) * fraction
+                    });
+                    break;
+                } else {
+                    result.push(line[nextI]);
+                    accumulated += segmentDist;
+                    i = nextI;
+                }
+            }
+            return result;
+        }
+
+        function trimRoadAroundPoint(line, target, maxMeters) {
+            const { index } = findClosestPointOnLine(line, target);
+            const backward = walkDistance(line, index, -1, maxMeters).reverse();
+            const forward = walkDistance(line, index, +1, maxMeters);
+            return backward.concat(forward.slice(1));
+        }
+
+        // =========================================================
+        // STREET NAME MATCHING
+        // =========================================================
+        function normalizeStreetName(name) {
+            if (!name) return "";
+            let n = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+            const replacements = [
+                [/\bboulevard\b/g, "blvd"], [/\bavenue\b/g, "ave"], [/\bstreet\b/g, "st"],
+                [/\bsaint\b/g, "st"], [/\bst-/g, "st "], [/[\/]/g, " "],
+                [/[^a-z0-9 ]/g, ""], [/\s+/g, " "]
+            ];
+            for (const [p, r] of replacements) n = n.replace(p, r);
+            return n.trim();
+        }
+
+        function streetNamesMatch(formName, osmName) {
+            const a = normalizeStreetName(formName), b = normalizeStreetName(osmName);
+            if (!a || !b) return false;
+            return a.includes(b) || b.includes(a);
+        }
+
+        function splitIntersection(address) {
+            return address.split(/\s*[\/&]\s*|\s+and\s+/i).map(s => s.trim()).filter(Boolean);
+        }
+
+        // =========================================================
+        // OVERPASS FETCHING (runs from the visitor's browser, not
+        // from Google's servers, to avoid the current cloud-IP block)
+        // =========================================================
+        async function fetchNearbyRoads(lat, lon, radiusMeters) {
+            const query = `[out:json][timeout:20];way["highway"](around:${radiusMeters},${lat},${lon});out geom;`;
+
+            for (const endpoint of OVERPASS_ENDPOINTS) {
+                const url = endpoint + '?data=' + encodeURIComponent(query);
+                try {
+                    const controller = new AbortController();
+                    const timeoutId = setTimeout(() => controller.abort(), OVERPASS_FETCH_TIMEOUT_MS);
+                    const res = await fetch(url, { signal: controller.signal, headers: { "Accept": "application/json" } });
+                    clearTimeout(timeoutId);
+
+                    if (!res.ok) continue; // try next endpoint
+
+                    const data = await res.json();
+                    if (!data.elements || data.elements.length === 0) return null;
+
+                    return data.elements
+                        .filter(el => el.type === "way" && el.geometry && el.geometry.length >= 2)
+                        .map(el => ({
+                            name: el.tags?.name || "",
+                            geometry: el.geometry.map(pt => ({ lat: pt.lat, lon: pt.lon }))
+                        }));
+                } catch (err) {
+                    continue; // try next endpoint (timeout, network error, etc.)
+                }
+            }
+            return null; // all endpoints failed
+        }
+
+        function findBestMatchingRoad(roads, candidateName, target) {
+            let best = null, bestDist = Infinity;
+            for (const road of roads) {
+                if (!road.name || !streetNamesMatch(candidateName, road.name)) continue;
+                const closest = findClosestPointOnLine(road.geometry, target);
+                if (closest.distance < bestDist) { bestDist = closest.distance; best = road; }
+            }
+            return best;
+        }
+
+        function findClosestRoadOverall(roads, target) {
+            let best = null, bestDist = Infinity;
+            for (const road of roads) {
+                const closest = findClosestPointOnLine(road.geometry, target);
+                if (closest.distance < bestDist) { bestDist = closest.distance; best = road; }
+            }
+            return (bestDist <= 120) ? best : null;
+        }
+
+        async function buildLineGeometryForReport(report) {
+            const target = { lat: report.lat, lon: report.lon };
+            const streetNames = splitIntersection(report.address);
+
+            if (streetNames.length >= 2) {
+                // Intersection: match BOTH streets, trim +/-200m each, forming a "+" shape
+                const nearbyRoads = await fetchNearbyRoads(report.lat, report.lon, OVERPASS_SEARCH_RADIUS_METERS + INTERSECTION_TRIM_METERS);
+                if (!nearbyRoads || nearbyRoads.length === 0) return null;
+
+                const segments = [];
+                for (const name of streetNames) {
+                    const match = findBestMatchingRoad(nearbyRoads, name, target);
+                    if (match) {
+                        const trimmed = trimRoadAroundPoint(match.geometry, target, INTERSECTION_TRIM_METERS);
+                        if (trimmed.length >= 2) segments.push(trimmed);
+                    }
+                }
+                return segments.length > 0 ? segments : null;
+            } else {
+                // Single address: match the one street, trim +/-80m
+                const nearbyRoads = await fetchNearbyRoads(report.lat, report.lon, OVERPASS_SEARCH_RADIUS_METERS);
+                if (!nearbyRoads || nearbyRoads.length === 0) return null;
+
+                let match = findBestMatchingRoad(nearbyRoads, report.address, target);
+                if (!match) match = findClosestRoadOverall(nearbyRoads, target);
+                if (!match) return null;
+
+                const trimmed = trimRoadAroundPoint(match.geometry, target, ADDRESS_TRIM_METERS);
+                return trimmed.length >= 2 ? [trimmed] : null;
+            }
+        }
+
+        // =========================================================
+        // MAIN LOAD
+        // =========================================================
         if (DATA_FEED_URL) {
             fetch(DATA_FEED_URL)
                 .then(res => res.json())
-                .then(reports => {
-                    reports.forEach(report => {
+                .then(async (reports) => {
+                    // Draw circles immediately so the map is never empty/slow,
+                    // then upgrade to lines as Overpass results come in.
+                    const reportRenders = reports.map(report => {
                         const color = getMarkerColor(report.severity);
-                        const popupContent = `
-                            <div style="font-family: sans-serif; font-size: 13px; line-height: 18px;">
-                                <strong style="font-size: 14px; color: #333;">${report.severity || ''}</strong><br>
-                                <hr style="border: 0; border-top: 1px solid #eee; margin: 6px 0;">
-                                <strong>Location / Emplacement:</strong> ${report.address}
-                                ${report.details ? `<br><strong>Details:</strong> ${report.details}` : ''}
-                            </div>
-                        `;
-
-                        // Check if item is a text-described intersection or a school/POI landmark
-                        const isIntersection = /[\/&]|\band\b/i.test(report.address) && !/school|high|park|centre/i.test(report.address);
-                        const hasHouseNumber = /^\d+/.test(report.address.trim());
-
-                        if (isIntersection) {
-                            // Perfect 150m crosshair coverage circle centered right over the intersection point
-                            L.circle([report.lat, report.lon], { radius: 150, fillColor: color, color: color, weight: 3, fillOpacity: 0.45 }).addTo(map).bindPopup(popupContent);
-                        } else if (!hasHouseNumber) {
-                            // Landmark/School Campus View: Big 200m radius circle that grows larger dynamically on close zoom layouts
-                            L.circle([report.lat, report.lon], { radius: 200, fillColor: color, color: color, weight: 2, fillOpacity: 0.4 }).addTo(map).bindPopup(popupContent);
-                        } else {
-                            // Single House Pinpoint Circle
-                            L.circle([report.lat, report.lon], { radius: 40, fillColor: color, color: color, weight: 2, fillOpacity: 0.6 }).addTo(map).bindPopup(popupContent);
-                        }
+                        const popupContent = buildPopup(report);
+                        return { report, color, popupContent };
                     });
+
+                    for (const { report, color, popupContent } of reportRenders) {
+                        try {
+                            const lineSegments = await buildLineGeometryForReport(report);
+                            if (lineSegments && lineSegments.length > 0) {
+                                lineSegments.forEach(segment => {
+                                    const latLngs = segment.map(pt => [pt.lat, pt.lon]);
+                                    L.polyline(latLngs, { color: color, weight: 6, opacity: 0.75, lineCap: 'round' })
+                                        .addTo(map).bindPopup(popupContent);
+                                });
+                                continue; // skip circle for this one
+                            }
+                        } catch (err) {
+                            console.warn("Line geometry failed for", report.address, "- falling back to circle.", err);
+                        }
+                        // Fallback: no line geometry available
+                        drawCircleFallback(report, color, popupContent);
+                    }
                 }).catch(err => console.error("Data pipeline load error:", err));
         }
 
