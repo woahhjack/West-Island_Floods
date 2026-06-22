@@ -36,7 +36,7 @@
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
         // Your live Google Apps Script Data Feed Link
-        const DATA_FEED_URL = "https://script.google.com/macros/s/AKfycbyzUizSK7SVi8iFXLxP4Hwq-T37XXwyI7oNa2SCoFuG3RSMruNvMetnUXYty4_w251Jug/exec";
+        const DATA_FEED_URL = "https://script.google.com/macros/s/AKfycbxNfHFi5zd41IgTSy04JgUznhCbvtQVn9tHcH7ryLubzhFlfNfbUf0_-aujaqOkxhKgxw/exec";
 
         // Center map coordinates on the West Island area
         const map = L.map('map').setView([45.4764, -73.8417], 12);
@@ -64,10 +64,10 @@
 
                         if (!address) return;
 
-                        // Geocoding query appending "West Island Montreal" to street lines automatically
-                        const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}+West+Island+Montreal`;
+                        // Geocoding query appending Quebec, Canada for high-accuracy regional indexing
+                        const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)},+Quebec,+Canada`;
                         
-                        // Small staggered delay to respect open-source server limits
+                        // 1.5-second staggered timeout window prevents open-source search server limits from tripping
                         setTimeout(() => {
                             fetch(searchUrl)
                                 .then(r => r.json())
@@ -76,7 +76,7 @@
                                         const loc = geoResults[0];
                                         const color = getMarkerColor(severity);
 
-                                        // Formats 12px circular area pins
+                                        // Formats 12px circular map pins
                                         const marker = L.circleMarker([loc.lat, loc.lon], {
                                             radius: 12,
                                             fillColor: color,
@@ -96,7 +96,7 @@
                                         `);
                                     }
                                 }).catch(err => console.error("Geocoding failed:", address, err));
-                        }, index * 250); 
+                        }, index * 1500); 
                     });
                 }).catch(err => console.error("Data feed error:", err));
         }
