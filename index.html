@@ -79,8 +79,15 @@
             `;
         }
 
+        function isLikelyPOI(address) {
+            // Schools, parks, and other landmarks don't sit on a single
+            // named street the way an address or intersection does -
+            // they should always render as a circle, never a line.
+            return /school|high|park|centre|church|hospital|library|mall|arena|stadium/i.test(address);
+        }
+
         function drawCircleFallback(report, color, popupContent) {
-            const isIntersection = /[\/&]|\band\b/i.test(report.address) && !/school|high|park|centre/i.test(report.address);
+            const isIntersection = /[\/&]|\band\b/i.test(report.address) && !isLikelyPOI(report.address);
             const hasHouseNumber = /^\d+/.test(report.address.trim());
 
             if (isIntersection) {
@@ -225,6 +232,11 @@
         }
 
         async function buildLineGeometryForReport(report) {
+            // POIs (schools, parks, landmarks) don't sit on a single
+            // named street - always leave them as circles, and skip
+            // the Overpass call entirely (saves a network request).
+            if (isLikelyPOI(report.address)) return null;
+
             const target = { lat: report.lat, lon: report.lon };
             const streetNames = splitIntersection(report.address);
 
