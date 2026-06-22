@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>West Island June 20 Flood Map / Carte des Inondations</title>
-    <!-- Leaflet Maps CSS -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
         body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
@@ -27,49 +26,48 @@
 </head>
 <body>
 
-    <!-- Bilingual Floating Action Button -->
+    <!-- Bilingual Floating Action Button linked to your Google Form -->
     <a href="https://docs.google.com/forms/d/e/1FAIpQLSeknXL4-K45ajNzb32mYb4nKLntBXpRv5abzQeLVaq258Mafg/viewform?usp=header" target="_blank" class="report-btn">
-        ⚠️ Report a Flooded Home<br><span style="font-size: 11px; font-weight: normal; display:block; margin-top:2px;">Signaler une maison inondée</span>
+        ⚠️ Report Flooding (Street or Home)<br><span style="font-size: 11px; font-weight: normal; display:block; margin-top:2px;">Signaler une inondation (rue ou maison)</span>
     </a>
 
     <div id="map"></div>
 
-    <!-- Leaflet Maps JavaScript -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // Paste your Google Apps Script Web App URL inside the quotes below:
-        const DATA_FEED_URL = "YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE";
+        // Your live Google Apps Script Data Feed Link
+        const DATA_FEED_URL = "https://script.google.com/macros/s/AKfycbyzUizSK7SVi8iFXLxP4Hwq-T37XXwyI7oNa2SCoFuG3RSMruNvMetnUXYty4_w251Jug/exec";
 
-        // Initialize map centered right over the West Island area
+        // Center map coordinates on the West Island area
         const map = L.map('map').setView([45.4764, -73.8417], 12);
 
-        // Load clean map graphics
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap contributors'
         }).addTo(map);
 
-        // Language-agnostic color parser (looks for EN or FR indicators)
         function getMarkerColor(severity) {
+            if (!severity) return '#5cb85c';
             const sev = severity.toLowerCase().trim();
-            if (sev.includes('severe') || sev.includes('majeur')) return '#d9534f'; // Red
-            if (sev.includes('mild') || sev.includes('modér') || sev.includes('moyen')) return '#f0ad4e'; // Yellow/Orange
-            return '#5cb85c'; // Green
+            if (sev.includes('severe') || sev.includes('majeur')) return '#d9534f'; 
+            if (sev.includes('mild') || sev.includes('modér') || sev.includes('medium') || sev.includes('moyen')) return '#f0ad4e'; 
+            return '#5cb85c'; 
         }
 
-        // Fetch data from your approved Google Sheet rows
-        if (DATA_FEED_URL !== "https://script.google.com/macros/s/AKfycbyzUizSK7SVi8iFXLxP4Hwq-T37XXwyI7oNa2SCoFuG3RSMruNvMetnUXYty4_w251Jug/exec") {
+        if (DATA_FEED_URL) {
             fetch(DATA_FEED_URL)
                 .then(res => res.json())
                 .then(reports => {
                     reports.forEach((report, index) => {
-                        const address = report.addressornearestintersection; 
+                        const address = report.address; 
                         const nickname = report.nickname || "Neighbor / Voisin";
-                        const severity = report.floodseverity || "Low / Faible";
+                        const severity = report.severity || "Low / Faible";
 
                         if (!address) return;
 
+                        // Geocoding query appending "West Island Montreal" to street lines automatically
                         const searchUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address)}+West+Island+Montreal`;
                         
+                        // Small staggered delay to respect open-source server limits
                         setTimeout(() => {
                             fetch(searchUrl)
                                 .then(r => r.json())
@@ -78,13 +76,14 @@
                                         const loc = geoResults[0];
                                         const color = getMarkerColor(severity);
 
+                                        // Formats 12px circular area pins
                                         const marker = L.circleMarker([loc.lat, loc.lon], {
-                                            radius: 10,
+                                            radius: 12,
                                             fillColor: color,
                                             color: '#fff',
                                             weight: 2,
                                             opacity: 1,
-                                            fillOpacity: 0.85
+                                            fillOpacity: 0.8
                                         }).addTo(map);
 
                                         marker.bindPopup(`
@@ -92,17 +91,17 @@
                                                 <strong style="font-size: 14px; color: #333;">${severity}</strong><br>
                                                 <hr style="border: 0; border-top: 1px solid #eee; margin: 6px 0;">
                                                 <strong>User / Info:</strong> ${nickname}<br>
-                                                <strong>Address / Adresse:</strong> ${address}
+                                                <strong>Location / Emplacement:</strong> ${address}
                                             </div>
                                         `);
                                     }
                                 }).catch(err => console.error("Geocoding failed:", address, err));
                         }, index * 250); 
                     });
-                }).catch(err => console.error("Data error:", err));
+                }).catch(err => console.error("Data feed error:", err));
         }
 
-        // Setup the map's visual legend box (Bilingual)
+        // Map Legend setup
         const legend = L.control({position: 'bottomright'});
         legend.onAdd = function () {
             const div = L.DomUtil.create('div', 'legend');
