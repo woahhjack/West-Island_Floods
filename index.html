@@ -36,7 +36,7 @@
     <script>
         const DATA_FEED_URL = "https://script.google.com/macros/s/AKfycbxNfHFi5zd41IgTSy04JgUznhCbvtQVn9tHcH7ryLubzhFlfNfbUf0_-aujaqOkxhKgxw/exec";
 
-        // Initialized zoom at 12.5 (1.5x closer scale than the original 12.0 setting)
+        // Initialized zoom at 12.5 (1.5x closer scale)
         const map = L.map('map').setView([45.4764, -73.8417], 12.5);
 
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -51,158 +51,39 @@
             return '#5cb85c'; 
         }
 
-        // Earth-radius Haversine calculation to measure exact physical meters between coordinates
-        function haversineDistance(lat1, lon1, lat2, lon2) {
-            const R = 6371000; 
-            const dLat = (lat2 - lat1) * Math.PI / 180;
-            const dLon = (lon2 - lon1) * Math.PI / 180;
-            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                      Math.sin(dLon/2) * Math.sin(dLon/2);
-            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-            return R * c; 
-        }
-
-        // Slices an open-source road coordinate array to exactly +/- 200 meters from a center point
-        function sliceRouteByDistance(coords, centerLat, centerLon, maxMeters) {
-            let closestIdx = -1;
-            let minDistance = Infinity;
-            
-            coords.forEach((coord, i) => {
-                let dist = haversineDistance(centerLat, centerLon, coord[1], coord[0]);
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    closestIdx = i;
-                }
-            });
-
-            if (closestIdx === -1) return coords;
-
-            let start = closestIdx;
-            while (start > 0 && haversineDistance(centerLat, centerLon, coords[start - 1][1], coords[start - 1][0]) <= maxMeters) {
-                start--;
-            }
-
-            let end = closestIdx;
-            while (end < coords.length - 1 && haversineDistance(centerLat, centerLon, coords[end + 1][1], coords[end + 1][0]) <= maxMeters) {
-                end++;
-            }
-
-            return coords.slice(start, end + 1);
-        }
-
         if (DATA_FEED_URL) {
             fetch(DATA_FEED_URL)
                 .then(res => res.json())
                 .then(reports => {
-                    reports.forEach((report, index) => {
-                        const addressText = report.address; 
-                        const nickname = report.nickname || "Neighbor / Voisin";
-                        const severity = report.severity || "Low / Faible";
-
-                        if (!addressText) return;
-
-                        const color = getMarkerColor(severity);
+                    reports.forEach(report => {
+                        const color = getMarkerColor(report.severity);
                         const popupContent = `
                             <div style="font-family: sans-serif; font-size: 13px; line-height: 18px;">
-                                <strong style="font-size: 14px; color: #333;">${severity}</strong><br>
+                                <strong style="font-size: 14px; color: #333;">${report.severity}</strong><br>
                                 <hr style="border: 0; border-top: 1px solid #eee; margin: 6px 0;">
-                                <strong>User / Info:</strong> ${nickname}<br>
-                                <strong>Location / Emplacement:</strong> ${addressText}
+                                <strong>User / Info:</strong> ${report.nickname}<br>
+                                <strong>Location / Emplacement:</strong> ${report.address}
                             </div>
                         `;
 
-                        // Parse location variations safely
-                        const isIntersection = /[\/&]|\band\b/i.test(addressText) && !/school|high|park|centre/i.test(addressText);
-                        const hasHouseNumber = /^\d+/.test(addressText.trim());
+                        // Check if item is a text-described intersection or a school/POI landmark
+                        const isIntersection = /[\/&]|\band\b/i.test(report.address) && !/school|high|park|centre/i.test(report.address);
+                        const hasHouseNumber = /^\d+/.test(report.address.trim());
 
-                        setTimeout(() => {
-                            if (isIntersection) {
-                                // TRACK 1: INTERSECTIONS (Highlight 200m down both cross streets)
-                                const parts = addressText.split(/[\/&]|\band\b/i).map(p => p.trim());
-                                const cleanSearchQuery = `${parts[0]} and ${parts[1]}, Quebec, Canada`;
-                                
-                                fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(cleanSearchQuery)}`)
-                                    .then(r => r.json())
-                                    .then(centerResult => {
-                                        if (centerResult && centerResult.length > 0) {
-                                            const cLat = parseFloat(centerResult[0].lat);
-                                            const cLon = parseFloat(centerResult[0].lon);
-
-                                            parts.forEach(streetName => {
-                                                fetch(`https://nominatim.openstreetmap.org/search?format=json&polygon_geojson=1&q=${encodeURIComponent(streetName)},+Quebec,+Canada`)
-                                                    .then(r2 => r2.json())
-                                                    .then(streetGeo => {
-                                                        const match = streetGeo.find(s => s.geojson && (s.geojson.type === "LineString" || s.geojson.type === "MultiLineString"));
-                                                        if (match) {
-                                                            if (match.geojson.type === "LineString") {
-                                                                match.geojson.coordinates = sliceRouteByDistance(match.geojson.coordinates, cLat, cLon, 200);
-                                                            } else if (match.geojson.type === "MultiLineString") {
-                                                                match.geojson.coordinates = match.geojson.coordinates.map(line => sliceRouteByDistance(line, cLat, cLon, 200));
-                                                            }
-                                                            L.geoJSON(match.geojson, { style: { color: color, weight: 9, opacity: 0.75, lineCap: 'round' } }).addTo(map).bindPopup(popupContent);
-                                                        }
-                                                    });
-                                            });
-                                        }
-                                    }).catch(err => console.error("Intersection mapping failed:", addressText, err));
-
-                            } else if (hasHouseNumber) {
-                                // TRACK 2: SPECIFIC HOUSE ADDRESS (Highlight 200m left/right along its road line)
-                                fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(addressText)},+Quebec,+Canada`)
-                                    .then(r => r.json())
-                                    .then(exactResult => {
-                                        if (exactResult && exactResult.length > 0) {
-                                            const hLat = parseFloat(exactResult[0].lat);
-                                            const hLon = parseFloat(exactResult[0].lon);
-                                            const baseStreetName = addressText.replace(/^\d+[-/\d]*\s+/, '');
-
-                                            fetch(`https://nominatim.openstreetmap.org/search?format=json&polygon_geojson=1&q=${encodeURIComponent(baseStreetName)},+Quebec,+Canada`)
-                                                .then(r2 => r2.json())
-                                                .then(streetGeo => {
-                                                    const match = streetGeo.find(s => s.geojson && (s.geojson.type === "LineString" || s.geojson.type === "MultiLineString"));
-                                                    if (match) {
-                                                        if (match.geojson.type === "LineString") {
-                                                            match.geojson.coordinates = sliceRouteByDistance(match.geojson.coordinates, hLat, hLon, 200);
-                                                        } else if (match.geojson.type === "MultiLineString") {
-                                                            match.geojson.coordinates = match.geojson.coordinates.map(line => sliceRouteByDistance(line, hLat, hLon, 200));
-                                                        }
-                                                        L.geoJSON(match.geojson, { style: { color: color, weight: 9, opacity: 0.75, lineCap: 'round' } }).addTo(map).bindPopup(popupContent);
-                                                    } else {
-                                                        L.circle([hLat, hLon], { radius: 125, fillColor: color, color: color, weight: 2, fillOpacity: 0.4 }).addTo(map).bindPopup(popupContent);
-                                                    }
-                                                });
-                                        }
-                                    }).catch(err => console.error("Address slicing failed:", addressText, err));
-
-                            } else {
-                                // TRACK 3: WHOLE STREET OR LANDMARK/POI
-                                fetch(`https://nominatim.openstreetmap.org/search?format=json&polygon_geojson=1&q=${encodeURIComponent(addressText)},+Quebec,+Canada`)
-                                    .then(r => r.json())
-                                    .then(geoResults => {
-                                        if (geoResults && geoResults.length > 0) {
-                                            const loc = geoResults[0];
-                                            if (loc.geojson && (loc.geojson.type === "LineString" || loc.geojson.type === "MultiLineString")) {
-                                                L.geoJSON(loc.geojson, { style: { color: color, weight: 8, opacity: 0.65, lineCap: 'round' } }).addTo(map).bindPopup(popupContent);
-                                            } else {
-                                                // Real-world physical circle scales fluidly as users zoom into campuses
-                                                L.circle([loc.lat, loc.lon], { 
-                                                    radius: 150, 
-                                                    fillColor: color, 
-                                                    color: color, 
-                                                    weight: 2, 
-                                                    fillOpacity: 0.4 
-                                                }).addTo(map).bindPopup(popupContent);
-                                            }
-                                        }
-                                    }).catch(err => console.error("Standard lookup failed:", addressText, err));
-                            }
-                        }, index * 3000);
+                        if (isIntersection) {
+                            // Perfect 150m crosshair coverage circle centered right over the intersection point
+                            L.circle([report.lat, report.lon], { radius: 150, fillColor: color, color: color, weight: 3, fillOpacity: 0.45 }).addTo(map).bindPopup(popupContent);
+                        } else if (!hasHouseNumber) {
+                            // Landmark/School Campus View: Big 200m radius circle that grows larger dynamically on close zoom layouts
+                            L.circle([report.lat, report.lon], { radius: 200, fillColor: color, color: color, weight: 2, fillOpacity: 0.4 }).addTo(map).bindPopup(popupContent);
+                        } else {
+                            // Single House Pinpoint Circle
+                            L.circle([report.lat, report.lon], { radius: 40, fillColor: color, color: color, weight: 2, fillOpacity: 0.6 }).addTo(map).bindPopup(popupContent);
+                        }
                     });
                 }).catch(err => console.error("Data pipeline load error:", err));
         }
 
-        // Map Legend setup
         const legend = L.control({position: 'bottomright'});
         legend.onAdd = function () {
             const div = L.DomUtil.create('div', 'legend');
