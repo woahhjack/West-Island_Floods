@@ -28,7 +28,7 @@
 <body>
 
     <!-- Bilingual Floating Action Button -->
-    <a href="YOUR_PUBLIC_GOOGLE_FORM_LINK_HERE" target="_blank" class="report-btn">
+    <a href="https://docs.google.com/forms/d/e/1FAIpQLSeknXL4-K45ajNzb32mYb4nKLntBXpRv5abzQeLVaq258Mafg/viewform?usp=header" target="_blank" class="report-btn">
         ⚠️ Report a Flooded Home<br><span style="font-size: 11px; font-weight: normal; display:block; margin-top:2px;">Signaler une maison inondée</span>
     </a>
 
@@ -57,7 +57,7 @@
         }
 
         // Fetch data from your approved Google Sheet rows
-        if (DATA_FEED_URL !== "YOUR_GOOGLE_APPS_SCRIPT_WEB_APP_URL_HERE") {
+        if (DATA_FEED_URL !== "https://script.google.com/macros/s/AKfycbyzUizSK7SVi8iFXLxP4Hwq-T37XXwyI7oNa2SCoFuG3RSMruNvMetnUXYty4_w251Jug/exec") {
             fetch(DATA_FEED_URL)
                 .then(res => res.json())
                 .then(reports => {
