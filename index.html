@@ -34,6 +34,7 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
+        // Paste your Apps Script Web App URL here (same one you had before)
         const DATA_FEED_URL = "https://script.google.com/macros/s/AKfycbxNfHFi5zd41IgTSy04JgUznhCbvtQVn9tHcH7ryLubzhFlfNfbUf0_-aujaqOkxhKgxw/exec";
 
         // Initialized zoom at 12.5 (1.5x closer scale)
@@ -59,10 +60,10 @@
                         const color = getMarkerColor(report.severity);
                         const popupContent = `
                             <div style="font-family: sans-serif; font-size: 13px; line-height: 18px;">
-                                <strong style="font-size: 14px; color: #333;">${report.severity}</strong><br>
+                                <strong style="font-size: 14px; color: #333;">${report.severity || ''}</strong><br>
                                 <hr style="border: 0; border-top: 1px solid #eee; margin: 6px 0;">
-                                <strong>User / Info:</strong> ${report.nickname}<br>
                                 <strong>Location / Emplacement:</strong> ${report.address}
+                                ${report.details ? `<br><strong>Details:</strong> ${report.details}` : ''}
                             </div>
                         `;
 
