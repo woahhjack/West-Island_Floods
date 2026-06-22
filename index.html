@@ -45,6 +45,14 @@
             "https://overpass.private.coffee/api/interpreter"
         ];
         const OVERPASS_FETCH_TIMEOUT_MS = 8000;
+        // corsproxy.io's free tier explicitly supports github.io as an
+        // origin. We route Overpass requests through it because some
+        // Overpass mirrors don't reliably send CORS headers for
+        // arbitrary origins, even though they answer fine to non-browser
+        // clients. This is a free third-party service with no uptime
+        // guarantee - if it's ever down, requests simply fail and we
+        // fall back to circles, same as any other Overpass failure.
+        const CORS_PROXY_PREFIX = "https://corsproxy.io/?url=";
 
         const map = L.map('map').setView([45.4764, -73.8417], 12.5);
 
@@ -76,11 +84,11 @@
             const hasHouseNumber = /^\d+/.test(report.address.trim());
 
             if (isIntersection) {
-                L.circle([report.lat, report.lon], { radius: 150, fillColor: color, color: color, weight: 3, fillOpacity: 0.45 }).addTo(map).bindPopup(popupContent);
+                return L.circle([report.lat, report.lon], { radius: 150, fillColor: color, color: color, weight: 3, fillOpacity: 0.45 }).addTo(map).bindPopup(popupContent);
             } else if (!hasHouseNumber) {
-                L.circle([report.lat, report.lon], { radius: 200, fillColor: color, color: color, weight: 2, fillOpacity: 0.4 }).addTo(map).bindPopup(popupContent);
+                return L.circle([report.lat, report.lon], { radius: 200, fillColor: color, color: color, weight: 2, fillOpacity: 0.4 }).addTo(map).bindPopup(popupContent);
             } else {
-                L.circle([report.lat, report.lon], { radius: 40, fillColor: color, color: color, weight: 2, fillOpacity: 0.6 }).addTo(map).bindPopup(popupContent);
+                return L.circle([report.lat, report.lon], { radius: 40, fillColor: color, color: color, weight: 2, fillOpacity: 0.6 }).addTo(map).bindPopup(popupContent);
             }
         }
 
@@ -171,11 +179,12 @@
             const query = `[out:json][timeout:20];way["highway"](around:${radiusMeters},${lat},${lon});out geom;`;
 
             for (const endpoint of OVERPASS_ENDPOINTS) {
-                const url = endpoint + '?data=' + encodeURIComponent(query);
+                const directUrl = endpoint + '?data=' + encodeURIComponent(query);
+                const proxiedUrl = CORS_PROXY_PREFIX + encodeURIComponent(directUrl);
                 try {
                     const controller = new AbortController();
                     const timeoutId = setTimeout(() => controller.abort(), OVERPASS_FETCH_TIMEOUT_MS);
-                    const res = await fetch(url, { signal: controller.signal, headers: { "Accept": "application/json" } });
+                    const res = await fetch(proxiedUrl, { signal: controller.signal, headers: { "Accept": "application/json" } });
                     clearTimeout(timeoutId);
 
                     if (!res.ok) continue; // try next endpoint
@@ -253,32 +262,39 @@
         if (DATA_FEED_URL) {
             fetch(DATA_FEED_URL)
                 .then(res => res.json())
-                .then(async (reports) => {
-                    // Draw circles immediately so the map is never empty/slow,
-                    // then upgrade to lines as Overpass results come in.
-                    const reportRenders = reports.map(report => {
+                .then((reports) => {
+                    // STEP 1: Draw every circle immediately, synchronously.
+                    // The map is fully populated the instant data arrives -
+                    // nothing waits on Overpass for this.
+                    const layers = reports.map(report => {
                         const color = getMarkerColor(report.severity);
                         const popupContent = buildPopup(report);
-                        return { report, color, popupContent };
+                        const circleLayer = drawCircleFallback(report, color, popupContent);
+                        return { report, color, popupContent, circleLayer };
                     });
 
-                    for (const { report, color, popupContent } of reportRenders) {
-                        try {
-                            const lineSegments = await buildLineGeometryForReport(report);
-                            if (lineSegments && lineSegments.length > 0) {
-                                lineSegments.forEach(segment => {
-                                    const latLngs = segment.map(pt => [pt.lat, pt.lon]);
-                                    L.polyline(latLngs, { color: color, weight: 6, opacity: 0.75, lineCap: 'round' })
-                                        .addTo(map).bindPopup(popupContent);
-                                });
-                                continue; // skip circle for this one
-                            }
-                        } catch (err) {
-                            console.warn("Line geometry failed for", report.address, "- falling back to circle.", err);
-                        }
-                        // Fallback: no line geometry available
-                        drawCircleFallback(report, color, popupContent);
-                    }
+                    // STEP 2: Kick off ALL Overpass lookups in parallel.
+                    // Each one independently swaps its own circle for a
+                    // line if/when it succeeds. A slow or failing row
+                    // never blocks any other row.
+                    layers.forEach(({ report, color, popupContent, circleLayer }) => {
+                        buildLineGeometryForReport(report)
+                            .then(lineSegments => {
+                                if (lineSegments && lineSegments.length > 0) {
+                                    map.removeLayer(circleLayer);
+                                    lineSegments.forEach(segment => {
+                                        const latLngs = segment.map(pt => [pt.lat, pt.lon]);
+                                        L.polyline(latLngs, { color: color, weight: 6, opacity: 0.75, lineCap: 'round' })
+                                            .addTo(map).bindPopup(popupContent);
+                                    });
+                                }
+                                // else: keep the circle that's already showing - no action needed
+                            })
+                            .catch(err => {
+                                console.warn("Line geometry failed for", report.address, "- keeping circle.", err);
+                                // circle is already shown, nothing more to do
+                            });
+                    });
                 }).catch(err => console.error("Data pipeline load error:", err));
         }
 
