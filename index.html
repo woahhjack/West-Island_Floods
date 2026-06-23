@@ -39,6 +39,7 @@
         const INTERSECTION_TRIM_METERS = 200;
         const ADDRESS_TRIM_METERS = 80;
         const SEARCH_MARGIN_METERS = 60; // extra buffer so trimmed roads have real data past the cut point
+        const ENDPOINT_TOLERANCE_METERS = 2; // how close two way-endpoints must be to count as "connected"
         const OVERPASS_ENDPOINTS = [
             "https://overpass-api.de/api/interpreter",
             "https://overpass.kumi.systems/api/interpreter",
@@ -79,31 +80,58 @@
             `;
         }
 
-        function isLikelyPOI(address) {
-            // Schools, parks, and other landmarks don't sit on a single
-            // named street the way an address or intersection does -
-            // they should always render as a circle, never a line.
-            // Includes both English and French keywords since reports
-            // come in both languages.
-            return /school|high|park|parc|centre|center|church|église|hospital|hôpital|library|bibliothèque|mall|arena|stadium|aréna/i.test(address);
+        // =========================================================
+        // ADDRESS CLASSIFICATION
+        // Determines how a report should render, based on the
+        // STRUCTURE of the address text rather than a list of known
+        // place-name keywords (which can never cover every possible
+        // school/store/landmark name a user might type).
+        // =========================================================
+        const STREET_TYPE_WORDS = /\b(rue|boul(?:evard)?|blvd|ave(?:nue)?|street|st|chemin|ch|place|pl|croissant|cr|montee|cote|terrasse|promenade|drive|dr|road|rd|court|ct|lane|ln|way|crescent)\b/i;
+
+        function splitIntersection(address) {
+            return address.split(/\s*[\/&]\s*|\s+and\s+/i).map(s => s.trim()).filter(Boolean);
+        }
+
+        function looksLikeStreetReference(address) {
+            const trimmed = address.trim();
+            const hasHouseNumber = /^\d+/.test(trimmed);
+            const hasIntersectionSeparator = splitIntersection(trimmed).length >= 2;
+            const hasStreetTypeWord = STREET_TYPE_WORDS.test(trimmed);
+            return hasHouseNumber || hasIntersectionSeparator || hasStreetTypeWord;
+        }
+
+        // Returns one of: "intersection", "address", "bare_street", "poi"
+        function classifyAddress(address) {
+            const trimmed = address.trim();
+            const hasHouseNumber = /^\d+/.test(trimmed);
+            const streetNames = splitIntersection(trimmed);
+
+            if (streetNames.length >= 2) return "intersection";
+            if (hasHouseNumber) return "address";
+            if (looksLikeStreetReference(trimmed)) return "bare_street";
+            return "poi";
         }
 
         function drawCircleFallback(report, color, popupContent) {
-            const isIntersection = /[\/&]|\band\b/i.test(report.address) && !isLikelyPOI(report.address);
-            const hasHouseNumber = /^\d+/.test(report.address.trim());
+            const category = classifyAddress(report.address);
 
-            if (isIntersection) {
+            if (category === "intersection") {
                 return L.circle([report.lat, report.lon], { radius: 150, fillColor: color, color: color, weight: 3, fillOpacity: 0.45 }).addTo(map).bindPopup(popupContent);
-            } else if (!hasHouseNumber) {
+            } else if (category === "bare_street" || category === "poi") {
+                // Bare street name (no house number) or a standalone
+                // place/landmark - both are ambiguous about exactly
+                // where along/within them the flooding is, so a wide
+                // circle is more honest than a line.
                 return L.circle([report.lat, report.lon], { radius: 200, fillColor: color, color: color, weight: 2, fillOpacity: 0.4 }).addTo(map).bindPopup(popupContent);
             } else {
+                // "address" - a specific house number
                 return L.circle([report.lat, report.lon], { radius: 40, fillColor: color, color: color, weight: 2, fillOpacity: 0.6 }).addTo(map).bindPopup(popupContent);
             }
         }
 
         // =========================================================
         // GEOMETRY MATH (Haversine distance + line trimming)
-        // Ported and validated from the original Apps Script version.
         // =========================================================
         function haversineMeters(p1, p2) {
             const R = 6371000;
@@ -153,6 +181,65 @@
             const backward = walkDistance(line, index, -1, maxMeters).reverse();
             const forward = walkDistance(line, index, +1, maxMeters);
             return backward.concat(forward.slice(1));
+        }
+
+        // =========================================================
+        // ROAD STITCHING
+        // OSM frequently splits a single real-world street into many
+        // separate "way" objects (e.g. one per block, or split at
+        // every intersection - this is standard, recommended OSM
+        // practice, not a data error). If we only trim within
+        // whichever single way is closest to our point, the highlight
+        // gets artificially clipped wherever the road happens to be
+        // segmented near that point - which is extremely common right
+        // at intersections. Fixing this requires stitching all
+        // same-named, connected ways into one continuous line first.
+        // =========================================================
+        function pointsMatch(p1, p2) {
+            return haversineMeters(p1, p2) <= ENDPOINT_TOLERANCE_METERS;
+        }
+
+        // Given a list of geometry arrays (already filtered to ones
+        // matching our target street name), stitch together any that
+        // connect end-to-end. Returns an array of stitched lines
+        // (more than one if there are disconnected clusters).
+        function stitchRoadGeometries(geometries) {
+            if (geometries.length === 0) return [];
+            if (geometries.length === 1) return [geometries[0]];
+
+            let remaining = geometries.map(g => g.slice());
+            const stitched = [];
+
+            while (remaining.length > 0) {
+                let current = remaining.shift();
+                let mergedSomething = true;
+
+                while (mergedSomething) {
+                    mergedSomething = false;
+                    for (let i = 0; i < remaining.length; i++) {
+                        const candidate = remaining[i];
+                        const curStart = current[0], curEnd = current[current.length - 1];
+                        const candStart = candidate[0], candEnd = candidate[candidate.length - 1];
+
+                        if (pointsMatch(curEnd, candStart)) {
+                            current = current.concat(candidate.slice(1));
+                        } else if (pointsMatch(curEnd, candEnd)) {
+                            current = current.concat(candidate.slice().reverse().slice(1));
+                        } else if (pointsMatch(curStart, candEnd)) {
+                            current = candidate.concat(current.slice(1));
+                        } else if (pointsMatch(curStart, candStart)) {
+                            current = candidate.slice().reverse().concat(current.slice(1));
+                        } else {
+                            continue;
+                        }
+                        remaining.splice(i, 1);
+                        mergedSomething = true;
+                        break;
+                    }
+                }
+                stitched.push(current);
+            }
+            return stitched;
         }
 
         // =========================================================
@@ -209,10 +296,6 @@
             return false;
         }
 
-        function splitIntersection(address) {
-            return address.split(/\s*[\/&]\s*|\s+and\s+/i).map(s => s.trim()).filter(Boolean);
-        }
-
         // =========================================================
         // OVERPASS FETCHING (runs from the visitor's browser, not
         // from Google's servers, to avoid the current cloud-IP block)
@@ -247,58 +330,70 @@
             return null; // all endpoints failed
         }
 
-        function findBestMatchingRoad(roads, candidateName, target) {
+        // Finds all roads matching candidateName, stitches any that
+        // connect end-to-end into continuous lines, then returns
+        // whichever stitched line passes closest to target.
+        function findBestMatchingStitchedRoad(roads, candidateName, target) {
+            const matchingGeometries = roads
+                .filter(r => r.name && streetNamesMatch(candidateName, r.name))
+                .map(r => r.geometry);
+            if (matchingGeometries.length === 0) return null;
+
+            const stitchedLines = stitchRoadGeometries(matchingGeometries);
+
             let best = null, bestDist = Infinity;
-            for (const road of roads) {
-                if (!road.name || !streetNamesMatch(candidateName, road.name)) continue;
-                const closest = findClosestPointOnLine(road.geometry, target);
-                if (closest.distance < bestDist) { bestDist = closest.distance; best = road; }
+            for (const line of stitchedLines) {
+                const closest = findClosestPointOnLine(line, target);
+                if (closest.distance < bestDist) { bestDist = closest.distance; best = line; }
             }
             return best;
         }
 
+        // Fallback when no name match is found at all: just take the
+        // single closest road of ANY name, with a sanity distance cap.
         function findClosestRoadOverall(roads, target) {
             let best = null, bestDist = Infinity;
             for (const road of roads) {
                 const closest = findClosestPointOnLine(road.geometry, target);
-                if (closest.distance < bestDist) { bestDist = closest.distance; best = road; }
+                if (closest.distance < bestDist) { bestDist = closest.distance; best = road.geometry; }
             }
             return (bestDist <= 120) ? best : null;
         }
 
         async function buildLineGeometryForReport(report) {
-            // POIs (schools, parks, landmarks) don't sit on a single
-            // named street - always leave them as circles, and skip
-            // the Overpass call entirely (saves a network request).
-            if (isLikelyPOI(report.address)) return null;
+            const category = classifyAddress(report.address);
+
+            // Bare street names and POIs/landmarks stay circles -
+            // skip the Overpass call entirely (saves a network request).
+            if (category === "bare_street" || category === "poi") return null;
 
             const target = { lat: report.lat, lon: report.lon };
-            const streetNames = splitIntersection(report.address);
 
-            if (streetNames.length >= 2) {
-                // Intersection: match BOTH streets, trim +/-200m each, forming a "+" shape
+            if (category === "intersection") {
+                const streetNames = splitIntersection(report.address);
                 const nearbyRoads = await fetchNearbyRoads(report.lat, report.lon, INTERSECTION_TRIM_METERS + SEARCH_MARGIN_METERS);
                 if (!nearbyRoads || nearbyRoads.length === 0) return null;
 
                 const segments = [];
                 for (const name of streetNames) {
-                    const match = findBestMatchingRoad(nearbyRoads, name, target);
-                    if (match) {
-                        const trimmed = trimRoadAroundPoint(match.geometry, target, INTERSECTION_TRIM_METERS);
+                    const stitchedLine = findBestMatchingStitchedRoad(nearbyRoads, name, target);
+                    if (stitchedLine) {
+                        const trimmed = trimRoadAroundPoint(stitchedLine, target, INTERSECTION_TRIM_METERS);
                         if (trimmed.length >= 2) segments.push(trimmed);
                     }
                 }
                 return segments.length > 0 ? segments : null;
+
             } else {
-                // Single address: match the one street, trim +/-80m
+                // category === "address"
                 const nearbyRoads = await fetchNearbyRoads(report.lat, report.lon, ADDRESS_TRIM_METERS + SEARCH_MARGIN_METERS);
                 if (!nearbyRoads || nearbyRoads.length === 0) return null;
 
-                let match = findBestMatchingRoad(nearbyRoads, report.address, target);
-                if (!match) match = findClosestRoadOverall(nearbyRoads, target);
-                if (!match) return null;
+                let stitchedLine = findBestMatchingStitchedRoad(nearbyRoads, report.address, target);
+                if (!stitchedLine) stitchedLine = findClosestRoadOverall(nearbyRoads, target);
+                if (!stitchedLine) return null;
 
-                const trimmed = trimRoadAroundPoint(match.geometry, target, ADDRESS_TRIM_METERS);
+                const trimmed = trimRoadAroundPoint(stitchedLine, target, ADDRESS_TRIM_METERS);
                 return trimmed.length >= 2 ? [trimmed] : null;
             }
         }
