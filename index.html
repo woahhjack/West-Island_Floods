@@ -88,6 +88,8 @@
         // school/store/landmark name a user might type).
         // =========================================================
         const STREET_TYPE_WORDS = /\b(rue|boul(?:evard)?|blvd|ave(?:nue)?|street|st|chemin|ch|place|pl|croissant|cr|montee|cote|terrasse|promenade|drive|dr|road|rd|court|ct|lane|ln|way|crescent)\b/i;
+        const CA_POSTAL_FULL = /^[A-Za-z]\d[A-Za-z][\s-]?\d[A-Za-z]\d$/;
+        const CA_POSTAL_FSA = /^[A-Za-z]\d[A-Za-z]$/;
 
         function splitIntersection(address) {
             return address.split(/\s*[\/&]\s*|\s+and\s+/i).map(s => s.trim()).filter(Boolean);
@@ -101,9 +103,14 @@
             return hasHouseNumber || hasIntersectionSeparator || hasStreetTypeWord;
         }
 
-        // Returns one of: "intersection", "address", "bare_street", "poi"
+        // Returns one of: "intersection", "address", "bare_street",
+        // "poi", "postal_fsa" (3-char, e.g. "H9B"), "postal_full" (6-char)
         function classifyAddress(address) {
             const trimmed = address.trim();
+
+            if (CA_POSTAL_FULL.test(trimmed)) return "postal_full";
+            if (CA_POSTAL_FSA.test(trimmed)) return "postal_fsa";
+
             const hasHouseNumber = /^\d+/.test(trimmed);
             const streetNames = splitIntersection(trimmed);
 
@@ -118,14 +125,14 @@
 
             if (category === "intersection") {
                 return L.circle([report.lat, report.lon], { radius: 150, fillColor: color, color: color, weight: 3, fillOpacity: 0.45 }).addTo(map).bindPopup(popupContent);
-            } else if (category === "bare_street" || category === "poi") {
-                // Bare street name (no house number) or a standalone
-                // place/landmark - both are ambiguous about exactly
-                // where along/within them the flooding is, so a wide
-                // circle is more honest than a line.
+            } else if (category === "bare_street" || category === "poi" || category === "postal_fsa") {
+                // Bare street name (no house number), a standalone
+                // place/landmark, or a 3-char postal sector - all are
+                // ambiguous about exactly where the flooding is within
+                // a wide area, so a circle is more honest than a line.
                 return L.circle([report.lat, report.lon], { radius: 200, fillColor: color, color: color, weight: 2, fillOpacity: 0.4 }).addTo(map).bindPopup(popupContent);
             } else {
-                // "address" - a specific house number
+                // "address" or "postal_full" - a specific point
                 return L.circle([report.lat, report.lon], { radius: 40, fillColor: color, color: color, weight: 2, fillOpacity: 0.6 }).addTo(map).bindPopup(popupContent);
             }
         }
@@ -300,9 +307,44 @@
         // OVERPASS FETCHING (runs from the visitor's browser, not
         // from Google's servers, to avoid the current cloud-IP block)
         // =========================================================
+
+        // Maps the Google Form's "Where is/was the flood" dropdown
+        // values to the OSM administrative area name to query. Uses
+        // the form's own values almost as-is - only "Pointe-claire"
+        // needed a casing fix. If a city's real OSM boundary name
+        // ever differs from what's listed here, the safety net
+        // (falling back to a circle when the boundary query returns
+        // nothing) keeps the map working either way.
+        const CITY_TO_OSM_AREA_NAME = {
+            "beaconsfield": "Beaconsfield",
+            "dollard-des-ormeaux": "Dollard-Des Ormeaux",
+            "kirkland": "Kirkland",
+            "pierrefonds-roxboro": "Pierrefonds-Roxboro",
+            "pointe-claire": "Pointe-Claire",
+            "dorval": "Dorval",
+        };
+
+        function resolveOsmAreaName(cityFromSheet) {
+            if (!cityFromSheet) return null;
+            return CITY_TO_OSM_AREA_NAME[cityFromSheet.trim().toLowerCase()] || null;
+        }
+
         async function fetchNearbyRoads(lat, lon, radiusMeters) {
             const query = `[out:json][timeout:20];way["highway"](around:${radiusMeters},${lat},${lon});out geom;`;
+            return fetchFromOverpass(query);
+        }
 
+        // Fetches ALL road segments matching streetName anywhere
+        // within the named city's administrative boundary - used for
+        // "bare street" reports where we want to highlight the whole
+        // street's run through that city, not just a point.
+        async function fetchRoadsInCity(osmAreaName, streetName) {
+            const escapedName = streetName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const query = `[out:json][timeout:25];area["name"="${osmAreaName}"]["boundary"="administrative"]->.searchArea;way["highway"]["name"~"${escapedName}",i](area.searchArea);out geom;`;
+            return fetchFromOverpass(query);
+        }
+
+        async function fetchFromOverpass(query) {
             for (const endpoint of OVERPASS_ENDPOINTS) {
                 const directUrl = endpoint + '?data=' + encodeURIComponent(query);
                 const proxiedUrl = CORS_PROXY_PREFIX + encodeURIComponent(directUrl);
@@ -360,12 +402,28 @@
             return (bestDist <= 120) ? best : null;
         }
 
+        // For a "whole street within this city" report: stitch EVERY
+        // matching road segment into however many continuous lines
+        // result (a long street can still end up as several disjoint
+        // pieces if it's interrupted - that's fine, we draw all of
+        // them). There's no single "closest point" to filter by here.
+        function stitchAllMatchingRoads(roads, streetName) {
+            const matchingGeometries = roads
+                .filter(r => r.name && streetNamesMatch(streetName, r.name))
+                .map(r => r.geometry);
+            if (matchingGeometries.length === 0) return null;
+            const stitched = stitchRoadGeometries(matchingGeometries);
+            return stitched.length > 0 ? stitched : null;
+        }
+
         async function buildLineGeometryForReport(report) {
             const category = classifyAddress(report.address);
 
-            // Bare street names and POIs/landmarks stay circles -
-            // skip the Overpass call entirely (saves a network request).
-            if (category === "bare_street" || category === "poi") return null;
+            // POIs/landmarks and 3-char postal sectors stay circles -
+            // skip Overpass entirely (saves a network request). A
+            // 6-char postal code alone has no street name to match
+            // against, so it also can't become a line.
+            if (category === "poi" || category === "postal_fsa" || category === "postal_full") return null;
 
             const target = { lat: report.lat, lon: report.lon };
 
@@ -384,8 +442,7 @@
                 }
                 return segments.length > 0 ? segments : null;
 
-            } else {
-                // category === "address"
+            } else if (category === "address") {
                 const nearbyRoads = await fetchNearbyRoads(report.lat, report.lon, ADDRESS_TRIM_METERS + SEARCH_MARGIN_METERS);
                 if (!nearbyRoads || nearbyRoads.length === 0) return null;
 
@@ -395,7 +452,24 @@
 
                 const trimmed = trimRoadAroundPoint(stitchedLine, target, ADDRESS_TRIM_METERS);
                 return trimmed.length >= 2 ? [trimmed] : null;
+
+            } else if (category === "bare_street") {
+                // Highlight the FULL run of this street within the
+                // reported city's boundary, not just a point around it.
+                // Requires the city column from the sheet - if it's
+                // missing or doesn't map to a known OSM area, fall
+                // back to the circle (handled by returning null).
+                const osmAreaName = resolveOsmAreaName(report.city);
+                if (!osmAreaName) return null;
+
+                const cityRoads = await fetchRoadsInCity(osmAreaName, report.address);
+                if (!cityRoads || cityRoads.length === 0) return null;
+
+                const stitchedLines = stitchAllMatchingRoads(cityRoads, report.address);
+                return stitchedLines; // already null-safe; array of segments or null
             }
+
+            return null;
         }
 
         // =========================================================
