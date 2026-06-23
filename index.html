@@ -38,7 +38,7 @@
 
         const INTERSECTION_TRIM_METERS = 200;
         const ADDRESS_TRIM_METERS = 80;
-        const OVERPASS_SEARCH_RADIUS_METERS = 150;
+        const SEARCH_MARGIN_METERS = 60; // extra buffer so trimmed roads have real data past the cut point
         const OVERPASS_ENDPOINTS = [
             "https://overpass-api.de/api/interpreter",
             "https://overpass.kumi.systems/api/interpreter",
@@ -80,12 +80,12 @@
         }
 
         function isLikelyPOI(address) {
-            // Schools, parks, stores, and other landmarks don't sit on a single
+            // Schools, parks, and other landmarks don't sit on a single
             // named street the way an address or intersection does -
-            // they should always render as a circle, never a line[cite: 1, 2].
-            
-            // Expanded regex list to include stores, fire stations, complexes, etc.
-            return /school|high|park|centre|church|hospital|library|mall|arena|stadium|store|firestation|caserne|complex|complexe|civic|maxi|indigo|pharmacy/i.test(address);
+            // they should always render as a circle, never a line.
+            // Includes both English and French keywords since reports
+            // come in both languages.
+            return /school|high|park|parc|centre|center|church|église|hospital|hôpital|library|bibliothèque|mall|arena|stadium|aréna/i.test(address);
         }
 
         function drawCircleFallback(report, color, popupContent) {
@@ -163,17 +163,50 @@
             let n = name.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
             const replacements = [
                 [/\bboulevard\b/g, "blvd"], [/\bavenue\b/g, "ave"], [/\bstreet\b/g, "st"],
-                [/\bsaint\b/g, "st"], [/\bst-/g, "st "], [/[\/]/g, " "],
+                [/\bsaint\b/g, "st"], [/-/g, " "], [/[\/]/g, " "],
                 [/[^a-z0-9 ]/g, ""], [/\s+/g, " "]
             ];
             for (const [p, r] of replacements) n = n.replace(p, r);
             return n.trim();
         }
 
+        function levenshteinDistance(a, b) {
+            const m = a.length, n = b.length;
+            if (m === 0) return n;
+            if (n === 0) return m;
+            const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+            for (let i = 0; i <= m; i++) dp[i][0] = i;
+            for (let j = 0; j <= n; j++) dp[0][j] = j;
+            for (let i = 1; i <= m; i++) {
+                for (let j = 1; j <= n; j++) {
+                    dp[i][j] = a[i - 1] === b[j - 1]
+                        ? dp[i - 1][j - 1]
+                        : 1 + Math.min(dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]);
+                }
+            }
+            return dp[m][n];
+        }
+
         function streetNamesMatch(formName, osmName) {
             const a = normalizeStreetName(formName), b = normalizeStreetName(osmName);
             if (!a || !b) return false;
-            return a.includes(b) || b.includes(a);
+            if (a.includes(b) || b.includes(a)) return true;
+
+            // Tolerate small typos (e.g. "Lavigned" vs "Lavigne") by
+            // checking each word in the OSM name against each word in
+            // the form name, allowing a small edit-distance for longer
+            // words. This catches one-character typos without being
+            // loose enough to match genuinely different street names.
+            const aWords = a.split(' ').filter(w => w.length >= 4);
+            const bWords = b.split(' ').filter(w => w.length >= 4);
+            for (const aw of aWords) {
+                for (const bw of bWords) {
+                    const maxLen = Math.max(aw.length, bw.length);
+                    const allowedDistance = maxLen >= 7 ? 2 : 1;
+                    if (levenshteinDistance(aw, bw) <= allowedDistance) return true;
+                }
+            }
+            return false;
         }
 
         function splitIntersection(address) {
@@ -244,7 +277,7 @@
 
             if (streetNames.length >= 2) {
                 // Intersection: match BOTH streets, trim +/-200m each, forming a "+" shape
-                const nearbyRoads = await fetchNearbyRoads(report.lat, report.lon, OVERPASS_SEARCH_RADIUS_METERS + INTERSECTION_TRIM_METERS);
+                const nearbyRoads = await fetchNearbyRoads(report.lat, report.lon, INTERSECTION_TRIM_METERS + SEARCH_MARGIN_METERS);
                 if (!nearbyRoads || nearbyRoads.length === 0) return null;
 
                 const segments = [];
@@ -258,7 +291,7 @@
                 return segments.length > 0 ? segments : null;
             } else {
                 // Single address: match the one street, trim +/-80m
-                const nearbyRoads = await fetchNearbyRoads(report.lat, report.lon, OVERPASS_SEARCH_RADIUS_METERS);
+                const nearbyRoads = await fetchNearbyRoads(report.lat, report.lon, ADDRESS_TRIM_METERS + SEARCH_MARGIN_METERS);
                 if (!nearbyRoads || nearbyRoads.length === 0) return null;
 
                 let match = findBestMatchingRoad(nearbyRoads, report.address, target);
