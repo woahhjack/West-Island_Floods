@@ -14,13 +14,33 @@
         }
         .legend i { width: 14px; height: 14px; float: left; margin-right: 8px; opacity: 0.8; border-radius: 50%; margin-top: 3px; }
         .report-btn {
-            position: absolute; top: 20px; left: 60px; z-index: 1000; 
-            background: white; padding: 12px 18px; border-radius: 8px; 
-            box-shadow: 0 4px 20px rgba(0,0,0,0.2); font-weight: bold; 
-            text-decoration: none; color: #d9534f; border: 2px solid #d9534f;
-            font-size: 14px; text-align: center; line-height: 1.4;
-            transition: all 0.2s ease;
-        }
+                    position: absolute; top: 20px; left: 60px; z-index: 1000; 
+                    background: #d9534f; padding: 12px 20px; border-radius: 8px; 
+                    font-weight: bold; text-decoration: none; color: white; 
+                    border: 2px solid #d9534f; font-size: 15px; text-align: center; 
+                    line-height: 1.4; transition: all 0.2s ease;
+                    animation: pulse-glow 2s infinite;
+                }
+                .report-btn:hover { 
+                    background: #c9302c; 
+                    border-color: #c9302c; 
+                    color: white; 
+                    animation: none; /* Stops pulsing when hovered */
+                    box-shadow: 0 6px 30px rgba(217, 83, 79, 0.6);
+                    transform: translateY(-1px);
+                }
+        
+                @keyframes pulse-glow {
+                    0% {
+                        box-shadow: 0 0 0 0 rgba(217, 83, 79, 0.7);
+                    }
+                    70% {
+                        box-shadow: 0 0 0 15px rgba(217, 83, 79, 0);
+                    }
+                    100% {
+                        box-shadow: 0 0 0 0 rgba(217, 83, 79, 0);
+                    }
+                }
         .report-btn:hover { background: #d9534f; color: white; }
     </style>
 </head>
