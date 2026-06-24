@@ -119,7 +119,19 @@
             const trimmed = address.trim();
             const hasHouseNumber = /^\d+/.test(trimmed);
             const hasIntersectionSeparator = splitIntersection(trimmed).length >= 2;
-            const hasStreetTypeWord = STREET_TYPE_WORDS.test(trimmed);
+
+            // A street-type word only counts if it's the FIRST or LAST
+            // word of the address - matching how real street names are
+            // actually formed in Quebec/the West Island ("Rue Huron",
+            // "Place Bellerive", "Parc Lake Road"). A street-type word
+            // buried in the MIDDLE of a longer string is much more
+            // likely to be an incidental mention near a business name
+            // ("Esso Provi-soir boul gouin", "Jean Coutu St Jean H9H")
+            // than the actual structure of a street reference.
+            const words = trimmed.split(/\s+/);
+            const hasStreetTypeWord = words.length > 0 &&
+                (STREET_TYPE_WORDS.test(words[0]) || STREET_TYPE_WORDS.test(words[words.length - 1]));
+
             return hasHouseNumber || hasIntersectionSeparator || hasStreetTypeWord;
         }
 
